@@ -287,6 +287,25 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     setPickerOpen(true);
   };
 
+  const pickerDrag = useRef<{ dx: number; dy: number } | null>(null);
+  const onPickerDragStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('button')) return;
+    const picker = (event.currentTarget.closest('.xp-picker') as HTMLElement | null);
+    if (!picker) return;
+    const rect = picker.getBoundingClientRect();
+    pickerDrag.current = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onPickerDragMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!pickerDrag.current) return;
+    const picker = (event.currentTarget.closest('.xp-picker') as HTMLElement | null);
+    const height = picker?.offsetHeight || 400;
+    const top = Math.max(8, Math.min(event.clientY - pickerDrag.current.dy, window.innerHeight - height - 8));
+    const left = Math.max(8, Math.min(event.clientX - pickerDrag.current.dx, window.innerWidth - 340 - 8));
+    setPickerPos({ top, left });
+  };
+  const onPickerDragEnd = () => { pickerDrag.current = null; };
+
   const addCustomModel = async (event: FormEvent) => {
     event.preventDefault();
     const model: ModelConfig = {
@@ -550,7 +569,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     {pickerOpen && (
       <div className="xp-scrim" onClick={() => setPickerOpen(false)}>
         <div className="xp-picker" style={pickerPos ? { top: pickerPos.top, left: pickerPos.left } : undefined} onClick={(e) => e.stopPropagation()}>
-          <div className="xp-picker-head">
+          <div className="xp-picker-head" onPointerDown={onPickerDragStart} onPointerMove={onPickerDragMove} onPointerUp={onPickerDragEnd} onPointerCancel={onPickerDragEnd}>
             <strong>Добавить модель</strong>
             <button className="xp-icon-btn" onClick={() => setPickerOpen(false)} aria-label="Закрыть"><X size={16} /></button>
           </div>
