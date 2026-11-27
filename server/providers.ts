@@ -1,4 +1,4 @@
-export type Provider = 'openai' | 'anthropic' | 'gemini' | 'timeweb';
+export type Provider = 'openai' | 'anthropic' | 'gemini' | 'timeweb' | 'custom';
 export type Message = { role: 'user' | 'assistant'; content: string };
 export type ProviderConfig = { provider: Provider; modelId: string; apiKey: string; baseUrl?: string | null };
 export type ProviderEvent =
@@ -32,8 +32,10 @@ function headers(apiKey: string, extra: Record<string, string> = {}) {
 }
 
 export async function* streamProvider(cfg: ProviderConfig, messages: Message[], signal: AbortSignal): AsyncGenerator<ProviderEvent> {
-  if (cfg.provider === 'openai' || cfg.provider === 'timeweb') {
-    const url = cfg.provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : timewebEndpoint(cfg.baseUrl || '');
+  if (cfg.provider === 'openai' || cfg.provider === 'timeweb' || cfg.provider === 'custom') {
+    const url = cfg.provider === 'openai' ? 'https://api.openai.com/v1/chat/completions'
+      : cfg.provider === 'timeweb' ? timewebEndpoint(cfg.baseUrl || '')
+      : customEndpoint(cfg.baseUrl || '');
     const body: Record<string, unknown> = { model: cfg.modelId, messages, stream: true };
     if (cfg.provider === 'openai') body.stream_options = { include_usage: true };
     const response = await fetch(url, {
@@ -79,6 +81,24 @@ export function timewebEndpoint(value: string) {
   const hostname = url.hostname.toLowerCase();
   const allowed = hostname === 'api.timeweb.ai' || hostname === 'agent.timeweb.cloud' || hostname.endsWith('.timeweb.ai') || hostname.endsWith('.timeweb.cloud');
   if (url.protocol !== 'https:' || !allowed || url.username || url.password) throw new Error('Разрешены только HTTPS endpoint на доменах Timeweb Cloud');
+  url.hash = '';
+  const path = url.pathname.replace(/\/+$/, '');
+  if (!path.endsWith('/chat/completions')) url.pathname = `${path}/chat/completions`;
+  return url.toString();
+}
+
+// OpenAI-совместимый endpoint на своём сервере: разрешены http(s), запрещены
+// адреса loopback и приватных сетей, чтобы запросы не уходили внутрь инфраструктуры.
+export function customEndpoint(value: string) {
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { throw new Error('Некорректный URL своего сервера'); }
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Разрешены только HTTP(S) endpoint');
+  if (url.username || url.password) throw new Error('URL не должен содержать логин и пароль');
+  const blocked = hostname === 'localhost' || hostname.endsWith('.local') || hostname.endsWith('.internal')
+    || /^127\./.test(hostname) || /^0\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname)
+    || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) || /^\[?::1\]?$/.test(hostname) || /^\[?f[cd][0-9a-f]{2}/.test(hostname);
+  if (blocked) throw new Error('Endpoint не должен указывать на локальные и приватные адреса');
   url.hash = '';
   const path = url.pathname.replace(/\/+$/, '');
   if (!path.endsWith('/chat/completions')) url.pathname = `${path}/chat/completions`;

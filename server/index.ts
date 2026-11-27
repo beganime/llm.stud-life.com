@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 import { config } from './config.ts';
 import { db, id, now, row, rows } from './db.ts';
 import { decrypt, encrypt, hashToken, newToken } from './crypto.ts';
-import { calculateCost, completeProvider, estimateTokens, streamProvider, timewebEndpoint, type Message, type Provider } from './providers.ts';
+import { calculateCost, completeProvider, customEndpoint, estimateTokens, streamProvider, timewebEndpoint, type Message, type Provider } from './providers.ts';
 
 type User = { id: string; name: string; email: string; is_admin: number };
 type AuthedRequest = Request & { user?: User };
@@ -207,12 +207,15 @@ function resolveModel(req: AuthedRequest, candidate: any): (StoredModel & { apiK
     const model = row<StoredModel>('SELECT * FROM model_configs WHERE id=? AND user_id=?', candidate.modelConfigId, req.user.id);
     return model ? { ...model, apiKey: decrypt(model.encrypted_key, config.encryptionKey) } : null;
   }
-  if (!candidate.apiKey || !candidate.displayName || !candidate.modelId || !['openai', 'anthropic', 'gemini', 'timeweb'].includes(candidate.provider)) return null;
+  if (!candidate.apiKey || !candidate.displayName || !candidate.modelId || !['openai', 'anthropic', 'gemini', 'timeweb', 'custom'].includes(candidate.provider)) return null;
   if (candidate.provider === 'timeweb') {
     try { timewebEndpoint(String(candidate.baseUrl || '')); } catch { return null; }
   }
+  if (candidate.provider === 'custom') {
+    try { customEndpoint(String(candidate.baseUrl || '')); } catch { return null; }
+  }
   return {
-    id: candidate.id || 'guest', user_id: '', display_name: candidate.displayName, provider: candidate.provider, model_id: candidate.modelId, base_url: candidate.provider === 'timeweb' ? candidate.baseUrl : null,
+    id: candidate.id || 'guest', user_id: '', display_name: candidate.displayName, provider: candidate.provider, model_id: candidate.modelId, base_url: (candidate.provider === 'timeweb' || candidate.provider === 'custom') ? candidate.baseUrl : null,
     encrypted_key: '', apiKey: candidate.apiKey, input_price: numberOrNull(candidate.inputPrice), output_price: numberOrNull(candidate.outputPrice),
     price_unit: Number(candidate.priceUnit || 1_000_000), currency: candidate.currency || 'USD',
   };

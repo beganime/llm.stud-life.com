@@ -10,7 +10,7 @@ type AdminOverview = {
   recentRuns: { id: string; prompt: string; createdAt: string; email: string; resultCount: number; completedCount: number }[];
 };
 
-const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini', timeweb: 'Timeweb Cloud' };
+const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini', timeweb: 'Timeweb Cloud', custom: 'Свой сервер' };
 
 export function AdminPage() {
   const [data, setData] = useState<AdminOverview | null>(null);

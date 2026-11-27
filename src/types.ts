@@ -1,4 +1,4 @@
-export type Provider = 'openai' | 'anthropic' | 'gemini' | 'timeweb';
+export type Provider = 'openai' | 'anthropic' | 'gemini' | 'timeweb' | 'custom';
 
 export type ModelConfig = {
   id: string;

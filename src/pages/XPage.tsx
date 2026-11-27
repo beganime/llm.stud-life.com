@@ -12,7 +12,11 @@ import './xpage.css';
 const MIN_MODELS = 2;
 const MAX_MODELS = 4;
 const SELECTED_KEY = 'llmc_x_models_v1';
-const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google', timeweb: 'Timeweb' };
+const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google', timeweb: 'Timeweb', custom: 'Свой сервер' };
+const MODEL_ID_HINTS: Record<string, string> = {
+  openai: 'gpt-4o-mini', anthropic: 'claude-haiku-4-5', gemini: 'gemini-2.5-flash',
+  timeweb: 'openai/gpt-4.1-mini или agent', custom: 'как называется модель на твоём сервере, напр. llama3.1:8b',
+};
 const CURRENCY_SYMBOLS: Record<string, string> = { USD: '$', EUR: '€', RUB: '₽', GBP: '£' };
 
 type Turn = { id: string; prompt: string; results: ModelResult[] };
@@ -313,7 +317,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
       displayName: custom.displayName.trim() || custom.modelId.trim(),
       provider: custom.provider,
       modelId: custom.modelId.trim(),
-      baseUrl: custom.provider === 'timeweb' ? custom.baseUrl.trim() || null : null,
+      baseUrl: (custom.provider === 'timeweb' || custom.provider === 'custom') ? custom.baseUrl.trim() || null : null,
       apiKey: custom.apiKey.trim(),
       inputPrice: null, outputPrice: null, priceUnit: 1000000, currency: 'USD',
     };
@@ -597,12 +601,20 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
                   <option value="anthropic">Anthropic</option>
                   <option value="gemini">Google Gemini</option>
                   <option value="timeweb">Timeweb Cloud</option>
+                  <option value="custom">Свой сервер (OpenAI-совместимый)</option>
                 </select>
-                <input required value={custom.modelId} onChange={(e) => setCustom({ ...custom, modelId: e.target.value })} placeholder="Идентификатор модели" />
+                <input required value={custom.modelId} onChange={(e) => setCustom({ ...custom, modelId: e.target.value })} placeholder={`Идентификатор модели: ${MODEL_ID_HINTS[custom.provider]}`} />
+                <small className="xp-custom-hint">Идентификатор — это имя модели, которое провайдер ждёт в запросе. Оно указано в документации провайдера или в панели рядом с API-ключом.</small>
                 {custom.provider === 'timeweb' && (
                   <input type="url" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} placeholder="Base URL (https://api.timeweb.ai/v1)" />
                 )}
-                <input required type="password" value={custom.apiKey} onChange={(e) => setCustom({ ...custom, apiKey: e.target.value })} placeholder="API-ключ (хранится только в браузере)" />
+                {custom.provider === 'custom' && (
+                  <>
+                    <input required type="url" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} placeholder="https://my-server.example/v1" />
+                    <small className="xp-custom-hint">Прямая ссылка на OpenAI-совместимый API: Ollama, vLLM, LM Studio или своя модель на своём сервере. `/chat/completions` добавим автоматически.</small>
+                  </>
+                )}
+                <input required type="password" value={custom.apiKey} onChange={(e) => setCustom({ ...custom, apiKey: e.target.value })} placeholder={custom.provider === 'custom' ? 'API-ключ (если сервер без ключа — любой текст)' : 'API-ключ (хранится только в браузере)'} />
                 <div className="xp-custom-actions">
                   <button type="button" className="xp-custom-cancel" onClick={() => setCustomOpen(false)}>Отмена</button>
                   <button type="submit" className="xp-custom-save">Добавить</button>
