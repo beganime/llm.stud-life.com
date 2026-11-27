@@ -135,7 +135,74 @@ function validateModel(body: Record<string, unknown>, keyRequired: boolean) {
 }
 const numberOrNull = (value: unknown) => value === '' || value == null ? null : Number(value);
 
+const demoHits = new Map<string, { count: number; resetAt: number }>();
+const DEMO_RATE_LIMIT = 30;
+const DEMO_RATE_WINDOW_MS = 3_600_000;
+function demoRateOk(ip: string): boolean {
+  const nowTs = Date.now();
+  const entry = demoHits.get(ip);
+  if (!entry || entry.resetAt < nowTs) {
+    demoHits.set(ip, { count: 1, resetAt: nowTs + DEMO_RATE_WINDOW_MS });
+    return true;
+  }
+  entry.count += 1;
+  return entry.count <= DEMO_RATE_LIMIT;
+}
+
+app.get('/api/demo/models', (_req, res) => {
+  res.json(config.demoApiKey ? config.demoModels : []);
+});
+
+// Публичное сохранение «гостевых» чатов, чтобы read-only ссылка работала без регистрации.
+const GUEST_SHARE_USER = 'guest-shared';
+db.prepare('INSERT OR IGNORE INTO users (id,name,email,password_hash,is_admin,created_at) VALUES (?,?,?,?,0,?)')
+  .run(GUEST_SHARE_USER, 'Guest', 'guest-shared@invalid.local', '!', now());
+
+app.post('/api/shared', (req, res) => {
+  if (!demoRateOk(req.ip || 'unknown')) return res.status(429).json({ error: 'Слишком много запросов. Попробуйте позже.' });
+  const payload = req.body;
+  const chatId = typeof payload?.id === 'string' && payload.id.length <= 64 ? payload.id : id();
+  const title = String(payload?.title || 'Без названия').slice(0, 120);
+  const comparisons = Array.isArray(payload?.comparisons) ? payload.comparisons.slice(0, 20) : [];
+  const timestamp = now();
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT OR IGNORE INTO chats (id,user_id,title,created_at,updated_at) VALUES (?,?,?,?,?)')
+      .run(chatId, GUEST_SHARE_USER, title, String(payload?.createdAt || timestamp), timestamp);
+    const insertComparison = db.prepare('INSERT OR IGNORE INTO comparisons (id,chat_id,user_id,prompt,created_at) VALUES (?,?,?,?,?)');
+    const insertResult = db.prepare(`INSERT OR IGNORE INTO results (id,comparison_id,user_id,model_config_id,model_name,provider,model_id,input_price,output_price,price_unit,currency,response,status,error,first_token_ms,total_ms,input_tokens,output_tokens,token_estimated,cost,liked,rating,is_winner,ai_evaluation,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const comparison of comparisons) {
+      const comparisonId = typeof comparison?.id === 'string' && comparison.id.length <= 64 ? comparison.id : id();
+      insertComparison.run(comparisonId, chatId, GUEST_SHARE_USER, String(comparison?.prompt || '').slice(0, 8000), String(comparison?.createdAt || timestamp));
+      for (const result of (Array.isArray(comparison?.results) ? comparison.results : []).slice(0, 8)) {
+        insertResult.run(
+          typeof result?.id === 'string' && result.id.length <= 64 ? result.id : id(), comparisonId, GUEST_SHARE_USER,
+          result?.modelConfigId ? String(result.modelConfigId).slice(0, 120) : null,
+          String(result?.modelName || 'Модель').slice(0, 120), String(result?.provider || 'demo').slice(0, 40), String(result?.modelId || '').slice(0, 120),
+          numberOrNull(result?.inputPrice), numberOrNull(result?.outputPrice), result?.priceUnit || null, result?.currency || null,
+          String(result?.response || '').slice(0, 100000), String(result?.status || 'done').slice(0, 20), result?.error ? String(result.error).slice(0, 500) : null,
+          result?.firstTokenMs ?? null, result?.totalMs ?? null, result?.inputTokens ?? null, result?.outputTokens ?? null,
+          result?.tokenEstimated ? 1 : 0, result?.cost ?? null, null, null, 0, null, timestamp,
+        );
+      }
+    }
+    db.prepare('UPDATE chats SET updated_at=?, title=? WHERE id=?').run(timestamp, title, chatId);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  res.status(201).json({ id: chatId });
+});
+
 function resolveModel(req: AuthedRequest, candidate: any): (StoredModel & { apiKey: string }) | null {
+  const demo = config.demoModels.find((item) => item.id === candidate?.demoModelId);
+  if (demo && config.demoApiKey) {
+    return {
+      id: demo.id, user_id: '', display_name: demo.displayName, provider: 'timeweb', model_id: demo.modelId, base_url: config.demoBaseUrl,
+      encrypted_key: '', apiKey: config.demoApiKey, input_price: null, output_price: null, price_unit: 1_000_000, currency: 'USD',
+    };
+  }
   if (req.user && candidate.modelConfigId) {
     const model = row<StoredModel>('SELECT * FROM model_configs WHERE id=? AND user_id=?', candidate.modelConfigId, req.user.id);
     return model ? { ...model, apiKey: decrypt(model.encrypted_key, config.encryptionKey) } : null;
@@ -164,6 +231,9 @@ app.post('/api/generate', async (req: AuthedRequest, res) => {
   const model = resolveModel(req, req.body.model);
   const messages = req.body.messages as Message[];
   if (!model || !Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'Некорректный запрос' });
+  if (model.id.startsWith('demo:') && !demoRateOk(req.ip || 'unknown')) {
+    return res.status(429).json({ error: 'Слишком много демо-запросов. Попробуйте позже или подключите свою модель.' });
+  }
   res.setHeader('content-type', 'text/event-stream; charset=utf-8');
   res.setHeader('cache-control', 'no-cache, no-transform');
   res.setHeader('connection', 'keep-alive');
@@ -222,6 +292,16 @@ app.get('/api/chats/:id', requireUser, (req: AuthedRequest, res) => {
   chat.comparisons = rows<any>('SELECT id,prompt,created_at createdAt FROM comparisons WHERE chat_id=? ORDER BY created_at', chat.id).map((comparison) => ({
     ...comparison,
     results: rows(`SELECT id,model_config_id modelConfigId,model_name modelName,provider,model_id modelId,input_price inputPrice,output_price outputPrice,price_unit priceUnit,currency,response,status,error,first_token_ms firstTokenMs,total_ms totalMs,input_tokens inputTokens,output_tokens outputTokens,token_estimated tokenEstimated,cost,liked,rating,is_winner isWinner,ai_evaluation aiEvaluation FROM results WHERE comparison_id=? ORDER BY created_at`, comparison.id),
+  }));
+  res.json(chat);
+});
+
+app.get('/api/shared/:id', (req, res) => {
+  const chat = row<any>('SELECT id,title,created_at createdAt,updated_at updatedAt FROM chats WHERE id=?', req.params.id);
+  if (!chat) return res.status(404).json({ error: 'Чат не найден' });
+  chat.comparisons = rows<any>('SELECT id,prompt,created_at createdAt FROM comparisons WHERE chat_id=? ORDER BY created_at', chat.id).map((comparison) => ({
+    ...comparison,
+    results: rows(`SELECT id,model_config_id modelConfigId,model_name modelName,provider,model_id modelId,currency,response,status,error,first_token_ms firstTokenMs,total_ms totalMs,input_tokens inputTokens,output_tokens outputTokens,token_estimated tokenEstimated,cost FROM results WHERE comparison_id=? ORDER BY created_at`, comparison.id),
   }));
   res.json(chat);
 });

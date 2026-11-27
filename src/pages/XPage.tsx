@@ -4,9 +4,9 @@ import { ArrowUp, Check, ChevronDown, ChevronUp, CircleStop, Clock3, Columns3, C
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, streamJson } from '../lib/api';
-import { getGuestKey, loadGuestChats, saveGuestChats } from '../lib/guest';
+import { getGuestKey, loadGuestChats, loadGuestModels, saveGuestChats, saveGuestModels, setGuestKey } from '../lib/guest';
 import { AuthModal } from '../components/AuthModal';
-import type { Chat, ChatSummary, ModelConfig, ModelResult, User } from '../types';
+import type { Chat, ChatSummary, ModelConfig, ModelResult, Provider, User } from '../types';
 import './xpage.css';
 
 const MIN_MODELS = 2;
@@ -17,6 +17,8 @@ const CURRENCY_SYMBOLS: Record<string, string> = { USD: '$', EUR: '€', RUB: '�
 
 type Turn = { id: string; prompt: string; results: ModelResult[] };
 type Badges = { fastest: string | null; cheapest: string | null };
+type DemoModel = { id: string; displayName: string; providerLabel: string; modelId: string };
+const isDemoModel = (id: string) => id.startsWith('demo:');
 
 function resultFromModel(model: ModelConfig): ModelResult {
   return { id: crypto.randomUUID(), modelConfigId: model.id, modelName: model.displayName, provider: model.provider, modelId: model.modelId, inputPrice: model.inputPrice, outputPrice: model.outputPrice, priceUnit: model.priceUnit, currency: model.currency, response: '', status: 'idle' };
@@ -85,9 +87,13 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
   });
   const [turns, setTurns] = useState<Turn[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
+  const [viewOnly, setViewOnly] = useState(() => new URLSearchParams(window.location.search).get('view') === '1');
   const [prompt, setPrompt] = useState('');
   const [running, setRunning] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPos, setPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [custom, setCustom] = useState({ displayName: '', provider: 'openai' as Provider, modelId: '', baseUrl: '', apiKey: '' });
   const [query, setQuery] = useState('');
   const [copied, setCopied] = useState(false);
   const [sideOpen, setSideOpen] = useState(false);
@@ -95,6 +101,8 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
   const [accountOpen, setAccountOpen] = useState(false);
   const [mobileTab, setMobileTab] = useState<Record<string, number>>({});
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+  const [demoModels, setDemoModels] = useState<DemoModel[]>([]);
+  const [demoLoaded, setDemoLoaded] = useState(false);
   const controllers = useRef(new Map<string, AbortController>());
   const turnsRef = useRef<Turn[]>([]);
   const chatIdRef = useRef<string | null>(null);
@@ -107,24 +115,50 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
   useEffect(() => { turnsRef.current = turns; }, [turns]);
   useEffect(() => { localStorage.setItem(SELECTED_KEY, JSON.stringify(selectedIds)); }, [selectedIds]);
   useEffect(() => {
-    setSelectedIds((current) => current.filter((id) => models.some((m) => m.id === id)).slice(0, MAX_MODELS));
-  }, [models]);
+    api<DemoModel[]>('/demo/models')
+      .then((list) => { setDemoModels(list); setDemoLoaded(true); })
+      .catch(() => setDemoLoaded(true));
+  }, []);
+  const demoAsConfigs = useMemo((): ModelConfig[] => demoModels.map((demo) => ({
+    id: demo.id, displayName: demo.displayName, provider: 'timeweb', modelId: demo.modelId,
+    baseUrl: null, inputPrice: null, outputPrice: null, priceUnit: 1000000, currency: 'USD',
+  })), [demoModels]);
+  const allModels = useMemo(() => [...models, ...demoAsConfigs], [models, demoAsConfigs]);
+  const demoLabel = useMemo(() => new Map(demoModels.map((demo) => [demo.id, demo.providerLabel])), [demoModels]);
+  const labelFor = (model: ModelConfig) => demoLabel.get(model.id) || providerName(model);
+  useEffect(() => {
+    if (!demoLoaded) return;
+    setSelectedIds((current) => current.filter((id) => allModels.some((m) => m.id === id)).slice(0, MAX_MODELS));
+  }, [allModels, demoLoaded]);
   useEffect(() => { threadEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [turns.length, running]);
 
   const selectedModels = useMemo(
-    () => selectedIds.map((id) => models.find((m) => m.id === id)).filter((m): m is ModelConfig => Boolean(m)),
-    [selectedIds, models],
+    () => selectedIds.map((id) => allModels.find((m) => m.id === id)).filter((m): m is ModelConfig => Boolean(m)),
+    [selectedIds, allModels],
   );
-  const canAdd = selectedIds.length < MAX_MODELS;
+  const viewModels = useMemo((): ModelConfig[] => {
+    if (!viewOnly) return [];
+    const seen = new Map<string, ModelConfig>();
+    for (const turn of turns) {
+      for (const r of turn.results) {
+        if (!seen.has(r.modelConfigId)) {
+          seen.set(r.modelConfigId, { id: r.modelConfigId, displayName: r.modelName, provider: r.provider, modelId: r.modelId, inputPrice: null, outputPrice: null, priceUnit: 1000000, currency: r.currency || 'USD' });
+        }
+      }
+    }
+    return [...seen.values()];
+  }, [viewOnly, turns]);
+  const columnModels = viewOnly ? viewModels : selectedModels;
+  const canAdd = selectedIds.length < MAX_MODELS && !viewOnly;
 
   const available = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return models.filter((model) => {
+    return allModels.filter((model) => {
       if (selectedIds.includes(model.id)) return false;
       if (!needle) return true;
-      return `${model.displayName} ${providerName(model)} ${model.modelId}`.toLowerCase().includes(needle);
+      return `${model.displayName} ${labelFor(model)} ${model.modelId}`.toLowerCase().includes(needle);
     });
-  }, [models, selectedIds, query]);
+  }, [allModels, selectedIds, query, demoLabel]);
 
   const updateResult = (turnId: string, modelConfigId: string, result: ModelResult) =>
     setTurns((current) => current.map((turn) => turn.id === turnId
@@ -138,15 +172,17 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     controllers.current.set(key, controller);
     let result: ModelResult = { ...resultFromModel(model), status: 'streaming' };
     updateResult(turn.id, model.id, result);
-    const guestKey = user ? undefined : getGuestKey(model.id);
-    if (!user && !guestKey) {
+    const demo = isDemoModel(model.id);
+    const guestKey = user || demo ? undefined : getGuestKey(model.id);
+    if (!user && !demo && !guestKey) {
       result = { ...result, status: 'error', error: 'Ключ недоступен после перезагрузки. Введите его снова на странице «Модели».' };
       updateResult(turn.id, model.id, result);
       return result;
     }
     const history = buildHistory(turnsRef.current.filter((item) => item.id !== turn.id), model.id, turn.prompt);
+    const modelPayload = demo ? { demoModelId: model.id } : user ? { modelConfigId: model.id } : { ...model, apiKey: guestKey };
     try {
-      await streamJson('/generate', { model: user ? { modelConfigId: model.id } : { ...model, apiKey: guestKey }, messages: history }, controller.signal, (event) => {
+      await streamJson('/generate', { model: modelPayload, messages: history }, controller.signal, (event) => {
         if (event.type === 'text') {
           result = { ...result, response: result.response + event.text, firstTokenMs: event.firstTokenMs };
         } else if (event.type === 'done') {
@@ -195,6 +231,8 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
         comparisons: allTurns.map((t) => ({ id: t.id, prompt: t.prompt, createdAt: createdRef.current || nowIso, results: t.results })),
       };
       saveGuestChats([chat, ...loadGuestChats().filter((item) => item.id !== id)]);
+      // Дублируем на сервер, чтобы read-only ссылка на чат открывалась у других людей.
+      void api('/shared', { method: 'POST', body: JSON.stringify(chat) }).catch(() => undefined);
       void onRefresh();
     }
   };
@@ -202,7 +240,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const text = prompt.trim();
-    if (!text || selectedModels.length < MIN_MODELS || running) return;
+    if (!text || selectedModels.length < MIN_MODELS || running || viewOnly) return;
     setPrompt('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setRunning(true);
@@ -211,11 +249,13 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     setTurns(nextTurns);
     const outcomes = await Promise.all(selectedModels.map((model) => generate(model, turn)));
     setRunning(false);
-    await persist(text, outcomes, nextTurns);
+    const finalTurns = nextTurns.map((item) => (item.id === turn.id ? { ...item, results: outcomes } : item));
+    setTurns(finalTurns);
+    await persist(text, outcomes, finalTurns);
   };
 
   const retry = (turn: Turn, modelConfigId: string) => {
-    const model = models.find((m) => m.id === modelConfigId);
+    const model = allModels.find((m) => m.id === modelConfigId);
     if (model) void generate(model, turn);
   };
 
@@ -236,11 +276,43 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     });
   };
 
-  const openPicker = () => { setQuery(''); setPickerOpen(true); };
+  const openPicker = (event: React.MouseEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 340;
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 12));
+    const top = Math.min(rect.bottom + 8, window.innerHeight - 120);
+    setPickerPos({ top, left });
+    setQuery('');
+    setCustomOpen(false);
+    setPickerOpen(true);
+  };
+
+  const addCustomModel = async (event: FormEvent) => {
+    event.preventDefault();
+    const model: ModelConfig = {
+      id: crypto.randomUUID(),
+      displayName: custom.displayName.trim() || custom.modelId.trim(),
+      provider: custom.provider,
+      modelId: custom.modelId.trim(),
+      baseUrl: custom.provider === 'timeweb' ? custom.baseUrl.trim() || null : null,
+      apiKey: custom.apiKey.trim(),
+      inputPrice: null, outputPrice: null, priceUnit: 1000000, currency: 'USD',
+    };
+    if (!model.modelId || !model.apiKey) return;
+    saveGuestModels([...loadGuestModels(), model]);
+    setGuestKey(model.id, model.apiKey);
+    setCustom({ displayName: '', provider: 'openai', modelId: '', baseUrl: '', apiKey: '' });
+    setCustomOpen(false);
+    await onRefresh();
+    addModel(model.id);
+  };
 
   const copyLink = async () => {
     try {
-      await navigator.clipboard.writeText(window.location.href);
+      const url = chatIdRef.current
+        ? `${window.location.origin}/x/?c=${chatIdRef.current}&view=1`
+        : window.location.href;
+      await navigator.clipboard.writeText(url);
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch { /* буфер недоступен */ }
@@ -255,13 +327,17 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     titleRef.current = null;
     createdRef.current = null;
     setRunning(false);
+    setViewOnly(false);
     window.history.replaceState(null, '', '/x/');
   };
 
-  const openChat = async (id: string) => {
+  const openChat = async (id: string, shared = false) => {
     stopAll();
     try {
-      const value = user ? await api<Chat>(`/chats/${id}`) : loadGuestChats().find((item) => item.id === id) || null;
+      let value: Chat | null = null;
+      if (user) value = await api<Chat>(`/chats/${id}`).catch(() => null);
+      else value = loadGuestChats().find((item) => item.id === id) || null;
+      if (!value && shared) value = await api<Chat>(`/shared/${id}`).catch(() => null);
       if (!value) return;
       const chat = normalizeChat(value);
       chatIdRef.current = chat.id;
@@ -270,18 +346,22 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
       createdRef.current = chat.createdAt;
       setTurns(chat.comparisons.map((c) => ({ id: c.id, prompt: c.prompt, results: c.results })));
       const last = chat.comparisons[chat.comparisons.length - 1];
-      setSelectedIds((last?.results.map((r) => r.modelConfigId) || []).filter((mid) => models.some((m) => m.id === mid)).slice(0, MAX_MODELS));
-      window.history.replaceState(null, '', `/x/?c=${chat.id}`);
+      if (!shared) setSelectedIds((last?.results.map((r) => r.modelConfigId) || []).filter((mid) => allModels.some((m) => m.id === mid)).slice(0, MAX_MODELS));
+      setViewOnly(shared);
+      window.history.replaceState(null, '', shared ? `/x/?c=${chat.id}&view=1` : `/x/?c=${chat.id}`);
       setSideOpen(false);
     } catch (error) { console.error(error); }
   };
 
   useEffect(() => {
     if (initialLoad.current) return;
-    const id = new URLSearchParams(window.location.search).get('c');
-    if (id && chats.some((chat) => chat.id === id)) {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('c');
+    if (!id) return;
+    const shared = params.get('view') === '1';
+    if (shared || chats.some((chat) => chat.id === id)) {
       initialLoad.current = true;
-      void openChat(id);
+      void openChat(id, shared);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats, user]);
@@ -309,8 +389,8 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
     };
   };
 
-  const contentCols = Math.max(selectedModels.length, 1);
-  const totalCols = selectedModels.length + (canAdd ? 1 : 0);
+  const contentCols = Math.max(columnModels.length, 1);
+  const totalCols = columnModels.length + (canAdd ? 1 : 0);
   const gridTemplate = { gridTemplateColumns: `repeat(${Math.max(totalCols, 1)}, minmax(230px, 1fr))` };
 
   return <div className="xp">
@@ -366,16 +446,22 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
           {!selectedModels.length && !turns.length && <section className="xp-welcome">
             <h1>Сравните ответы моделей</h1>
             <p>Добавьте от двух до четырёх моделей и задайте один вопрос — ответы появятся рядом, колонка к колонке.</p>
+            {canAdd && (
+              <button className="xp-add-button xp-add-welcome" onClick={openPicker}>
+                <span className="xp-add-circle"><Plus size={19} /></span>
+                Добавить модель
+              </button>
+            )}
           </section>}
           <div className="xp-heads" style={isMobile ? undefined : gridTemplate}>
-            {selectedModels.map((model) => (
+            {columnModels.map((model) => (
               <div key={model.id} className="xp-head-cell">
                 <div className="xp-model-card">
                   <div className="xp-model-card-text">
                     <strong>{model.displayName}</strong>
-                    <small>{providerName(model)}</small>
+                    <small>{labelFor(model)}</small>
                   </div>
-                  <button className="xp-icon-btn" onClick={() => removeModel(model.id)} aria-label="Убрать модель"><X size={14} /></button>
+                  {!viewOnly && <button className="xp-icon-btn" onClick={() => removeModel(model.id)} aria-label="Убрать модель"><X size={14} /></button>}
                 </div>
               </div>
             ))}
@@ -383,7 +469,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
           </div>
           <div className="xp-turns" style={isMobile ? undefined : gridTemplate}>
             {canAdd && !isMobile && (
-              <div className="xp-add-cell" style={{ gridColumn: selectedModels.length + 1, gridRow: `1 / ${Math.max(turns.length * 2, 1) + 1}` }}>
+              <div className="xp-add-cell" style={{ gridColumn: columnModels.length + 1, gridRow: `1 / ${Math.max(turns.length * 2, 1) + 1}` }}>
                 <button className="xp-add-button" onClick={openPicker}>
                   <span className="xp-add-circle"><Plus size={19} /></span>
                   Добавить модель
@@ -408,7 +494,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
                   {canAdd && <button className="xp-tabs-add" onClick={openPicker} aria-label="Добавить модель"><Plus size={14} /></button>}
                 </div>}
                 {turn.results.map((result, index) => {
-                  const column = selectedModels.findIndex((m) => m.id === result.modelConfigId) + 1;
+                  const column = columnModels.findIndex((m) => m.id === result.modelConfigId) + 1;
                   if (!column) return null;
                   return <div
                     key={result.id}
@@ -418,6 +504,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
                     <AnswerContent
                       result={result}
                       badges={badges}
+                      readOnly={viewOnly}
                       thinkingExpanded={expandedThinking.has(result.id)}
                       onToggleThinking={() => toggleThinking(result.id)}
                       onRetry={() => retry(turn, result.modelConfigId)}
@@ -431,6 +518,11 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
         </div>
       </div>
 
+      {viewOnly ? (
+        <div className="xp-composer-dock">
+          <div className="xp-viewnote">Режим просмотра: по этой ссылке чат доступен только для чтения</div>
+        </div>
+      ) : (
       <div className="xp-composer-dock">
         <form className="xp-composer" onSubmit={(event) => { void submit(event); }}>
           <textarea
@@ -442,9 +534,9 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
               e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
             }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }}
-            placeholder={models.length ? 'Задайте вопрос всем моделям' : 'Сначала подключите модель'}
+            placeholder={allModels.length ? 'Задайте вопрос всем моделям' : 'Сначала подключите модель'}
             rows={1}
-            disabled={!models.length}
+            disabled={!allModels.length}
           />
           {running
             ? <button type="button" className="xp-send stop" onClick={stopAll} aria-label="Остановить"><CircleStop size={17} /></button>
@@ -452,11 +544,12 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
         </form>
         {selectedModels.length < MIN_MODELS && <div className="xp-hint">Для сравнения нужно от {MIN_MODELS} до {MAX_MODELS} моделей</div>}
       </div>
+      )}
     </div>
 
     {pickerOpen && (
       <div className="xp-scrim" onClick={() => setPickerOpen(false)}>
-        <div className="xp-picker" onClick={(e) => e.stopPropagation()}>
+        <div className="xp-picker" style={pickerPos ? { top: pickerPos.top, left: pickerPos.left } : undefined} onClick={(e) => e.stopPropagation()}>
           <div className="xp-picker-head">
             <strong>Добавить модель</strong>
             <button className="xp-icon-btn" onClick={() => setPickerOpen(false)} aria-label="Закрыть"><X size={16} /></button>
@@ -470,12 +563,36 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
               <button key={model.id} className="xp-picker-row" onClick={() => addModel(model.id)}>
                 <span className="xp-picker-row-text">
                   <strong>{model.displayName}</strong>
-                  <small>{providerName(model)}</small>
+                  <small>{labelFor(model)}</small>
                 </span>
                 <Plus size={16} />
               </button>
-            )) : <div className="xp-picker-empty">{models.length ? 'Ничего не найдено' : 'Сначала подключите модель на странице «Модели»'}</div>}
+            )) : <div className="xp-picker-empty">{allModels.length ? 'Ничего не найдено' : 'Добавьте свою модель ниже'}</div>}
           </div>
+          {!user && (
+            customOpen ? (
+              <form className="xp-custom" onSubmit={(e) => { void addCustomModel(e); }}>
+                <input required value={custom.displayName} onChange={(e) => setCustom({ ...custom, displayName: e.target.value })} placeholder="Название (например, GPT-4o mini)" />
+                <select value={custom.provider} onChange={(e) => setCustom({ ...custom, provider: e.target.value as Provider })}>
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="timeweb">Timeweb Cloud</option>
+                </select>
+                <input required value={custom.modelId} onChange={(e) => setCustom({ ...custom, modelId: e.target.value })} placeholder="Идентификатор модели" />
+                {custom.provider === 'timeweb' && (
+                  <input type="url" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} placeholder="Base URL (https://api.timeweb.ai/v1)" />
+                )}
+                <input required type="password" value={custom.apiKey} onChange={(e) => setCustom({ ...custom, apiKey: e.target.value })} placeholder="API-ключ (хранится только в браузере)" />
+                <div className="xp-custom-actions">
+                  <button type="button" className="xp-custom-cancel" onClick={() => setCustomOpen(false)}>Отмена</button>
+                  <button type="submit" className="xp-custom-save">Добавить</button>
+                </div>
+              </form>
+            ) : (
+              <button className="xp-custom-toggle" onClick={() => setCustomOpen(true)}><Plus size={15} />Своя модель</button>
+            )
+          )}
           <div className="xp-picker-foot">В сравнении может быть от {MIN_MODELS} до {MAX_MODELS} моделей</div>
         </div>
       </div>
@@ -485,14 +602,14 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
   </div>;
 }
 
-function AnswerContent({ result, badges, thinkingExpanded, onToggleThinking, onRetry }: { result: ModelResult; badges: Badges; thinkingExpanded: boolean; onToggleThinking: () => void; onRetry: () => void }) {
+function AnswerContent({ result, badges, readOnly, thinkingExpanded, onToggleThinking, onRetry }: { result: ModelResult; badges: Badges; readOnly: boolean; thinkingExpanded: boolean; onToggleThinking: () => void; onRetry: () => void }) {
   if (result.status === 'error') {
     return <div className="xp-error-card">
       <Info size={19} />
       <strong>Модель не ответила</strong>
-      <p>Остальные ответы сохранены. Можно повторить запрос для этой модели.</p>
+      <p>{readOnly ? 'Эта модель не дала ответа на вопрос.' : 'Остальные ответы сохранены. Можно повторить запрос для этой модели.'}</p>
       {result.error && <small>{result.error}</small>}
-      <button className="xp-retry" onClick={onRetry}><RefreshCw size={14} />Повторить</button>
+      {!readOnly && <button className="xp-retry" onClick={onRetry}><RefreshCw size={14} />Повторить</button>}
     </div>;
   }
   return <>
