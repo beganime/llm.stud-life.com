@@ -572,7 +572,7 @@ export function XPage({ user, models, chats, onRefresh }: { user: User | null; m
 
     {pickerOpen && (
       <div className="xp-scrim" onClick={() => setPickerOpen(false)}>
-        <div className="xp-picker" style={pickerPos ? { top: pickerPos.top, left: pickerPos.left } : undefined} onClick={(e) => e.stopPropagation()}>
+        <div className="xp-picker" style={pickerPos ? { top: pickerPos.top, left: pickerPos.left, maxHeight: `calc(100vh - ${Math.round(pickerPos.top)}px - 12px)` } : undefined} onClick={(e) => e.stopPropagation()}>
           <div className="xp-picker-head" onPointerDown={onPickerDragStart} onPointerMove={onPickerDragMove} onPointerUp={onPickerDragEnd} onPointerCancel={onPickerDragEnd}>
             <strong>Добавить модель</strong>
             <button className="xp-icon-btn" onClick={() => setPickerOpen(false)} aria-label="Закрыть"><X size={16} /></button>
